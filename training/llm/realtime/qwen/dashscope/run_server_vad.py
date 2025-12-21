@@ -1,0 +1,243 @@
+import os
+import base64
+import signal
+import sys
+import time
+import pyaudio
+import dashscope
+from dashscope.audio.qwen_omni import *
+
+from B64PCMPlayer import B64PCMPlayer
+
+voice = 'Cherry'  # qwen3-omni-flash-realtime 支持的声音
+
+pya = None
+mic_stream = None
+b64_player = None
+conversation = None
+
+DO_VIDEO_TEST = False
+
+if DO_VIDEO_TEST:
+    fake_video = None
+    with open('data/cat_480p.jpg', 'rb') as image_file:
+        fake_video = base64.b64encode(image_file.read()).decode('ascii')
+
+def init_dashscope_api_key():
+    """
+        Set your DashScope API-key. More information:
+        https://github.com/aliyun/alibabacloud-bailian-speech-demo/blob/master/PREREQUISITES.md
+    """
+
+    if 'DASHSCOPE_API_KEY' in os.environ:
+        dashscope.api_key = os.environ[
+            'DASHSCOPE_API_KEY']  # load API-key from environment variable DASHSCOPE_API_KEY
+    else:
+        dashscope.api_key = 'sk-8e0b5b24b5874bc5a7af77dae8e846d4'  # set API-key manually
+
+
+class MyCallback(OmniRealtimeCallback):
+    def on_open(self) -> None:
+        global pya
+        global mic_stream
+        global b64_player
+        print('connection opened, init microphone')
+        pya = pyaudio.PyAudio()
+        mic_stream = pya.open(format=pyaudio.paInt16,
+                        channels=1,
+                        rate=16000,
+                        input=True)
+        b64_player = B64PCMPlayer(pya)
+
+    def on_close(self, close_status_code, close_msg) -> None:
+        print('connection closed with code: {}, msg: {}, destroy microphone'.format(close_status_code, close_msg))
+        sys.exit(0)
+
+    def on_event(self, response: str) -> None:
+        try:
+            global conversation
+            global b64_player
+            type = response['type']
+            if 'session.error' == type:
+                print('session error: {}'.format(response['session']['error']))
+            if 'session.updated' == type:
+                print('session updated: {}'.format(response['session']['instructions']))
+            if 'session.created' == type:
+                print('start session: {}'.format(response['session']['id']))
+            if 'conversation.item.input_audio_transcription.completed' == type:
+                print('question: {}'.format(response['transcript']))
+            if 'response.audio_transcript.delta' == type:
+                text = response['delta']
+                print("got llm response delta: {}".format(text))
+            if 'response.audio.delta' == type:
+                recv_audio_b64 = response['delta']
+                b64_player.add_data(recv_audio_b64)
+            if 'input_audio_buffer.speech_started' == type:
+                print('======VAD Speech Start======')
+                b64_player.cancel_playing()
+            if 'response.done' == type:
+                print('======RESPONSE DONE======')
+                print('[Metric] response: {}, first text delay: {}, first audio delay: {}'.format(
+                                conversation.get_last_response_id(), 
+                                conversation.get_last_first_text_delay(), 
+                                conversation.get_last_first_audio_delay(),
+                                ))
+        except Exception as e:
+            print('[Error] {}'.format(e))
+            return
+
+
+if __name__  == '__main__':
+    init_dashscope_api_key()
+
+    print('Initializing ...')
+    
+    record_pcm_file = open('./llm/realtime/qwen/dashscope/data/record_16khz.pcm', 'wb')
+
+    callback = MyCallback()
+
+    conversation = OmniRealtimeConversation(
+        model='qwen3-omni-flash-realtime',
+        callback=callback, 
+        )
+
+    conversation.connect()
+
+    instructions="""
+    # 任务描述
+    - 你作为家长电话，正在电话咨询课程，咨询过程是一个多轮的对话。
+
+    # 角色定义：
+    - 你是一个咨询培训机构的学生家长，这是你唯一的身份。
+
+    # 判断身份规则：
+    - 你只有一个身份，是一个学生家长。禁止介绍任何课程或产品。被禁止的话术示例：我可以给你介绍一下新东方的课程
+    - 你只有一个身份，是一个学生家长。禁止询问对方是否想要了解课程。被禁止的话术示例：要不要了解一下新东方的课程？
+    - 说话前，你必须判断当前你要输出的内容是否符合家长身份
+        只有符合家长身份时，才能说你的对话内容。
+        不符合家长身份时，说：刚才我没有听清，您能再重复一遍吗？
+    ---
+
+    #基本信息：
+    .当被问及[孩子年级]：七年级
+    .当被问及[学校]：北环
+    .当被问及[成绩]:语文:89.0,数学:98.0,英语:35.0
+    .当被问及[薄弱学科]：英语
+    .当被问及[失分点]：完形填空、阅读理解
+    .当被问及[补习经历]：孩子没补习过
+    .当被问及[升学目标]：想上重点高中
+    .当被问及[学习能力]：爱玩不爱学
+    .当被问及[报名意向]：价格太贵
+
+    # 待提问队列：
+    1. 想了解一下，新东方这边的培训课程？
+    2. 这次考试英语成绩不太好，想了解一下？
+    3. 你们的英语课程是什么样的，主要是复习学校内容，还是讲解新的课程内容？
+    4. 你们的授课老师的学历如何？教学风格和效果如何？
+    5. 你们是线上课还是线下课程？
+    6. 你们的课程一期有几节课？是周末上课还是工作日上课？
+    6. 这个课程价格是多少？
+    7. 你们这个课程有线下体验课吗？
+    
+    # 顾虑问题：
+    **关键词映射表**：
+        顾虑组A: 学校分析
+    | 销售话术特征        | 触发顾虑                          | 响应动作 |
+    |---------------------|-----------------------------------|----------|
+    | "对学生所在学校正面评价" | "听说学校还不错，才让孩子上这个学校，这个学校的升学率怎么样？" | 立即提问 |
+    | "对学生所在学校负面评价" | "感觉这个学校一般，前多少名能有不错的学校上？" | 立即提问 |
+    | "升学规划" | "老师按照你规划，如果想考上再好一点的学校？孩子成绩需要提高多少分？" | 立即提问     |
+    | "介绍好学校" | "我该如何做什么，才能让孩子考上你介绍的学校？" | 插入待提问队列     |
+        
+        顾虑组B: 成绩诊断:
+        | 销售话术特征        | 触发顾虑                          | 响应动作 |
+        |---------------------|----------|----------|
+        | "几何薄弱"          | "课程能解决几何问题吗？"          | 立即提问     |
+        | "试卷分析"，“失分项”，“得分率”       | "按照你的分析我们能考上什么学校？"          | 立即提问     |
+        
+        顾虑组C: 课程介绍:
+        | 销售话术特征        | 触发顾虑                          | 响应动作 |
+        |----------|----------|----------|
+        | "课程是线上课" | "线上课是否影响孩子视力？如何保证学习效果？" | 立即提问     |
+        | "课程是线下课" | "线下课一个班大概多少人？如何保证孩子的学习效果？" | 立即提问     |
+    ---
+
+    # 对话控制：
+    ## 对话开始的约束：
+    - 本次对话，对方必须以“家长您好”开头。
+    - 如果没有按照要求开头，请提示对方：“请以‘家长您好’开头”，否则不进行任何对话。
+
+    ## 对话过程约束：
+
+    ### 启动阶段：
+    - 销售必须以“家长你好”作为开头，否则提示销售。
+    - 默认第一个问题是：“您好，我想了解一下新东方这边的课程？”
+
+    ### 顾虑触发阶段：
+    - 当销售触发顾虑组的销售话术特性时，将“触发顾虑”中的问题，插入到当前“待提问队列”中的第一个位置。
+
+    ### 问题沟通阶段：
+    #### 提问前校验：
+    - 回答问题前，检验你的身份，如果发现身份不是家长，出现偏差及时矫正或回复：“刚才您说什么，我没有听清”
+    - 回答问题前，检验是否将触发的顾虑加入到“待提问队列”中
+
+    #### 提问规则：
+    - 按顺序从“待提问队列”中提出问题，提问时口语化。可以适当修改问题文法，但需要保持问题意思不变。
+    - 每提问一个问题，将问题从“待提问队列”中移出。
+    - 回答时口语化，同时对销售表达的内容做合理的回应。
+    - 当被问及：“展示待提问队列”，则展示出待提问队列的问题。
+
+    ### 沟通评价阶段：
+    1. 更新你对本次对练销售的评价、打分、建议。
+    2. 结束模拟对练后，对销售的表现进行评价和建议，评价和建议不用显示到对话中。
+    3. 结束模拟对练后，对本次销售的表现进行“流畅度”打分，满分是100分。流畅度打分，不用显示到对话中。
+    4. 结束模拟对练后，你作为家长，对本次销售的表现进行认可度评价：不满意、一般、积极。认可度评价，不用显示到对话中。
+
+    ## 对话结束的约束：
+    - 待提问队列中的问题需要全部问完，再进行终止判断矩阵中的组合条件。
+    - 结束对话后，不再回答任何问题，并提示：“培训已结束”。
+
+    # 防御性对话设计
+    1. 当遇到无法回答的问题："这个我需要和孩子爸爸商量下"
+    2. 当遇到与咨询课程不相关的问题时："这个问题跟我咨询的内容好像没关系吧"
+    """
+    conversation.update_session(
+        output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
+        voice=voice,
+        input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
+        output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
+        enable_input_audio_transcription=True,
+        input_audio_transcription_model='gummy-realtime-v1',
+        enable_turn_detection=True,
+        turn_detection_type='server_vad',
+        instructions=instructions
+    )
+
+
+    
+    def signal_handler(sig, frame):
+        print('Ctrl+C pressed, stop recognition ...')
+        # Stop recognition
+        conversation.close()
+        b64_player.shutdown()
+        print('omni realtime stopped.')
+        # Forcefully exit the program
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    print("Press 'Ctrl+C' to stop conversation...")
+
+    #模拟多轮交互，在server_vad模式下，服务会自动处理打断，用户可以持续发送静音
+    last_photo_time = time.time()*1000
+    while True:
+        if mic_stream:
+            audio_data = mic_stream.read(3200, exception_on_overflow=False)
+            record_pcm_file.write(audio_data)
+            audio_b64 = base64.b64encode(audio_data).decode('ascii')
+            conversation.append_audio(audio_b64)
+            if DO_VIDEO_TEST and time.time()*1000 - last_photo_time > 500:
+                # 每500ms发送一张图片
+                conversation.append_video(fake_video)
+                last_photo_time = time.time()*1000
+        else:
+            break
