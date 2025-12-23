@@ -25,6 +25,11 @@ const routes = [
     path: '/practice',
     name: 'Practice',
     component: () => import('@/views/Practice.vue')
+  },
+  {
+    path: '/voice-call',
+    name: 'VoiceCall',
+    component: () => import('@/views/VoiceCall.vue')
   }
 ]
 
