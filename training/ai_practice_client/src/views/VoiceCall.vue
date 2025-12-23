@@ -163,6 +163,9 @@ export default {
     const callStartTime = ref(null);
     const callDuration = ref(0);
     const transcript = ref([]);
+    
+    // 音频缓冲
+    const audioChunks = ref([]);
 
     // 调试
     const showDebug = ref(WebRTCConfig.ui.showDebug); // 从配置文件读取
@@ -288,22 +291,42 @@ export default {
         console.log('会话已创建:', message);
       });
 
-      // 处理音频响应
+      // 处理音频响应增量
       wsService.value.on('response.audio.delta', (message) => {
         if (message.delta) {
-          // 播放接收到的音频
+          console.log('🔊 收到音频增量 #' + (audioChunks.value.length + 1) + ':', message.delta.length, 'bytes');
+          // 累积音频数据
           isSpeaking.value = true;
-          webrtcService.value.playAudio(message.delta, 'pcm');
+          audioChunks.value.push(message.delta);
+        } else {
+          console.warn('⚠️ 收到空的音频delta');
         }
       });
 
       // 处理音频响应完成
-      wsService.value.on('response.audio.done', () => {
+      wsService.value.on('response.audio.done', async () => {
+        console.log('✅ 音频接收完成，开始播放...');
         isSpeaking.value = false;
+        
+        // 合并所有音频片段并播放
+        if (audioChunks.value.length > 0) {
+          try {
+            await playAllAudioChunks();
+          } catch (error) {
+            console.error('播放音频失败:', error);
+          }
+        }
+      });
+
+      // 处理VAD - 用户开始说话
+      wsService.value.on('input_audio_buffer.speech_started', () => {
+        console.log('🎤 用户开始说话，清空音频缓冲');
+        audioChunks.value = [];  // 清空之前的音频缓冲
       });
 
       // 处理转录结果
       wsService.value.on('conversation.item.created', (message) => {
+        console.log('📝 收到转录:', message);
         if (message.item && message.item.content) {
           const content = message.item.content[0];
           if (content.transcript) {
@@ -311,6 +334,7 @@ export default {
               role: message.item.role,
               text: content.transcript
             });
+            console.log(`✅ 添加${message.item.role}的对话:`, content.transcript);
           }
         }
       });
@@ -322,9 +346,140 @@ export default {
       });
 
       // 监听所有消息（用于调试）
-      wsService.value.on('*', (message) => {
-        console.log('收到消息:', message);
-      });
+      // wsService.value.on('*', (message) => {
+      //   console.log('收到消息:', message);
+      // });
+    };
+
+    // 播放所有音频片段
+    const playAllAudioChunks = async () => {
+      if (audioChunks.value.length === 0) {
+        console.warn('⚠️ 没有音频数据可播放');
+        return;
+      }
+      
+      try {
+        console.log('🎵 准备播放', audioChunks.value.length, '个音频片段');
+        console.log('🎵 第一个片段长度:', audioChunks.value[0]?.length || 0);
+        
+        // 将所有base64片段解码并合并
+        const allPcmData = [];
+        for (let i = 0; i < audioChunks.value.length; i++) {
+          const chunk = audioChunks.value[i];
+          try {
+            // 解码base64
+            const binaryString = atob(chunk);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let j = 0; j < binaryString.length; j++) {
+              bytes[j] = binaryString.charCodeAt(j);
+            }
+            // 转换为Int16
+            const int16Array = new Int16Array(bytes.buffer);
+            allPcmData.push(...int16Array);
+            
+            if (i === 0) {
+              console.log('🎵 第一个片段解码后长度:', int16Array.length, '个采样点');
+            }
+          } catch (err) {
+            console.error(`🔴 解码第${i}个片段失败:`, err);
+          }
+        }
+        
+        if (allPcmData.length === 0) {
+          console.error('🔴 没有有效的PCM数据');
+          return;
+        }
+        
+        console.log('🎵 总PCM数据长度:', allPcmData.length, '个采样点');
+        console.log('🎵 预计播放时长:', (allPcmData.length / 24000).toFixed(2), '秒');
+        
+        // 转换为WAV并播放
+        const wavBlob = pcmToWav(new Int16Array(allPcmData), 24000);
+        console.log('🎵 WAV文件大小:', wavBlob.size, 'bytes');
+        
+        const audioUrl = URL.createObjectURL(wavBlob);
+        const audio = new Audio(audioUrl);
+        
+        // 设置音量
+        audio.volume = 1.0;
+        
+        audio.onloadedmetadata = () => {
+          console.log('🎵 音频元数据加载完成，时长:', audio.duration, '秒');
+        };
+        
+        audio.oncanplay = () => {
+          console.log('🎵 音频可以播放了');
+        };
+        
+        audio.onplay = () => {
+          console.log('🎵 音频开始播放');
+        };
+        
+        audio.onended = () => {
+          console.log('🎵 音频播放完成');
+          URL.revokeObjectURL(audioUrl);
+        };
+        
+        audio.onerror = (error) => {
+          console.error('🔴 音频播放错误:', error);
+          console.error('🔴 错误代码:', audio.error?.code);
+          console.error('🔴 错误消息:', audio.error?.message);
+        };
+        
+        try {
+          await audio.play();
+          console.log('✅ 音频播放命令已发送');
+        } catch (playError) {
+          console.error('🔴 播放失败:', playError);
+        }
+        
+      } catch (error) {
+        console.error('🔴 播放音频过程出错:', error);
+        console.error('🔴 错误堆栈:', error.stack);
+      } finally {
+        // 清空音频缓冲
+        audioChunks.value = [];
+      }
+    };
+    
+    // PCM转WAV（在组件内部实现）
+    const pcmToWav = (pcmData, sampleRate = 24000) => {
+      const numChannels = 1;
+      const bitsPerSample = 16;
+      const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+      const blockAlign = numChannels * bitsPerSample / 8;
+      const dataSize = pcmData.length * 2;
+
+      const buffer = new ArrayBuffer(44 + dataSize);
+      const view = new DataView(buffer);
+
+      // WAV文件头
+      const writeString = (offset, string) => {
+        for (let i = 0; i < string.length; i++) {
+          view.setUint8(offset + i, string.charCodeAt(i));
+        }
+      };
+
+      writeString(0, 'RIFF');
+      view.setUint32(4, 36 + dataSize, true);
+      writeString(8, 'WAVE');
+      writeString(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, byteRate, true);
+      view.setUint16(32, blockAlign, true);
+      view.setUint16(34, bitsPerSample, true);
+      writeString(36, 'data');
+      view.setUint32(40, dataSize, true);
+
+      // 写入PCM数据
+      for (let i = 0; i < pcmData.length; i++) {
+        view.setInt16(44 + i * 2, pcmData[i], true);
+      }
+
+      return new Blob([buffer], { type: 'audio/wav' });
     };
 
     // 断开连接
@@ -359,17 +514,25 @@ export default {
         return;
       }
 
+      let audioSentCount = 0;
       webrtcService.value.startRecording((audioData) => {
         // 发送音频数据到服务器
         if (wsService.value && wsService.value.isConnected()) {
+          audioSentCount++;
+          if (audioSentCount === 1 || audioSentCount % 50 === 0) {
+            console.log(`🎤 已发送 ${audioSentCount} 个音频包，最新大小: ${audioData.data.length} bytes`);
+          }
           wsService.value.send({
             type: 'input_audio_buffer.append',
             audio: audioData.data // PCM base64数据，不需要split
           });
+        } else {
+          console.warn('⚠️ WebSocket未连接，无法发送音频');
         }
       });
 
       isRecording.value = true;
+      console.log('✅ 开始录音，准备发送音频数据...');
     };
 
     // 停止录音

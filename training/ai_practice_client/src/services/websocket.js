@@ -40,6 +40,8 @@ class WebSocketService {
 
         // 接收消息
         this.ws.onmessage = (event) => {
+          // const preview = typeof event.data === 'string' ? event.data.substring(0, 100) : 'binary';
+          // console.log('📥 收到服务器消息:', preview + '...');  // 注释掉避免刷屏
           this.handleMessage(event);
         };
 
@@ -80,6 +82,7 @@ class WebSocketService {
       if (typeof event.data === 'string') {
         try {
           message = JSON.parse(event.data);
+          console.log('📨 收到消息类型:', message.type);
         } catch {
           message = { type: 'text', data: event.data };
         }
@@ -98,7 +101,10 @@ class WebSocketService {
       if (message && message.type) {
         const handler = this.messageHandlers.get(message.type);
         if (handler) {
+          console.log('✅ 调用处理器:', message.type);
           handler(message);
+        } else {
+          console.warn('⚠️ 没有找到处理器:', message.type);
         }
 
         // 同时调用通用消息处理器

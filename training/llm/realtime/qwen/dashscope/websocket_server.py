@@ -60,10 +60,12 @@ def load_prompt(prompt_file: str = DEFAULT_PROMPT_FILE) -> str:
 class RealtimeCallback(OmniRealtimeCallback):
     """Realtime API回调处理"""
     
-    def __init__(self, websocket: WebSocketServerProtocol, session_id: str):
+    def __init__(self, websocket: WebSocketServerProtocol, session_id: str, loop):
         self.websocket = websocket
         self.session_id = session_id
         self.is_closed = False
+        self.loop = loop  # 保存事件循环引用
+        self.current_response_text = ''  # 累积当前响应的文本
     
     def on_open(self) -> None:
         logger.info(f'[{self.session_id}] DashScope connection opened')
@@ -80,39 +82,40 @@ class RealtimeCallback(OmniRealtimeCallback):
             # 会话创建
             if event_type == 'session.created':
                 logger.info(f'[{self.session_id}] Session created')
-                asyncio.create_task(self.send_to_client({
+                self.send_to_client_threadsafe({
                     'type': 'session.created',
                     'session': {
                         'id': response.get('session', {}).get('id', self.session_id),
                         'model': 'qwen3-omni-flash-realtime',
                         'created_at': response.get('session', {}).get('created_at', 0)
                     }
-                }))
+                })
             
             # 会话更新
             elif event_type == 'session.updated':
                 logger.info(f'[{self.session_id}] Session updated')
-                asyncio.create_task(self.send_to_client({
+                self.send_to_client_threadsafe({
                     'type': 'session.updated',
                     'session': response.get('session', {})
-                }))
+                })
             
             # 会话错误
             elif event_type == 'session.error':
                 logger.error(f'[{self.session_id}] Session error: {response}')
-                asyncio.create_task(self.send_to_client({
+                self.send_to_client_threadsafe({
                     'type': 'error',
                     'error': {
                         'code': 'session_error',
                         'message': response.get('session', {}).get('error', 'Unknown error')
                     }
-                }))
+                })
             
             # 用户输入转录完成
             elif event_type == 'conversation.item.input_audio_transcription.completed':
                 transcript = response.get('transcript', '')
+                print(f'[{self.session_id}] 🎤 用户说: {transcript}')
                 logger.info(f'[{self.session_id}] User said: {transcript}')
-                asyncio.create_task(self.send_to_client({
+                self.send_to_client_threadsafe({
                     'type': 'conversation.item.created',
                     'item': {
                         'id': response.get('item_id', ''),
@@ -122,48 +125,63 @@ class RealtimeCallback(OmniRealtimeCallback):
                             'transcript': transcript
                         }]
                     }
-                }))
+                })
             
             # AI响应文本增量
             elif event_type == 'response.audio_transcript.delta':
                 text_delta = response.get('delta', '')
+                # 累积文本
+                self.current_response_text += text_delta
                 logger.debug(f'[{self.session_id}] AI text delta: {text_delta}')
-                asyncio.create_task(self.send_to_client({
+                self.send_to_client_threadsafe({
                     'type': 'response.text.delta',
                     'delta': text_delta,
                     'response_id': response.get('response_id', '')
-                }))
+                })
             
             # AI响应音频增量
             elif event_type == 'response.audio.delta':
                 audio_delta = response.get('delta', '')
-                asyncio.create_task(self.send_to_client({
+                print(f'[{self.session_id}] 🔊 发送音频片段: {len(audio_delta)} bytes')
+                logger.debug(f'[{self.session_id}] 🔊 Sending audio delta: {len(audio_delta)} bytes')
+                self.send_to_client_threadsafe({
                     'type': 'response.audio.delta',
                     'delta': audio_delta,
                     'response_id': response.get('response_id', '')
-                }))
+                })
             
             # 语音活动检测 - 用户开始说话
             elif event_type == 'input_audio_buffer.speech_started':
+                print(f'\n[{self.session_id}] ======VAD: 检测到用户开始说话======')
+                # 清空之前的累积文本
+                self.current_response_text = ''
                 logger.info(f'[{self.session_id}] VAD: Speech started')
-                asyncio.create_task(self.send_to_client({
+                self.send_to_client_threadsafe({
                     'type': 'input_audio_buffer.speech_started'
-                }))
+                })
             
             # 语音活动检测 - 用户停止说话
             elif event_type == 'input_audio_buffer.speech_stopped':
+                print(f'[{self.session_id}] ======VAD: 检测到用户停止说话======')
                 logger.info(f'[{self.session_id}] VAD: Speech stopped')
-                asyncio.create_task(self.send_to_client({
+                self.send_to_client_threadsafe({
                     'type': 'input_audio_buffer.speech_stopped'
-                }))
+                })
             
             # 响应完成
             elif event_type == 'response.done':
+                print(f'\n[{self.session_id}] ======响应完成======')
+                
+                # 输出累积的完整文本
+                if self.current_response_text:
+                    print(f'[{self.session_id}] 🤖 AI回复: {self.current_response_text}')
+                    self.current_response_text = ''  # 清空累积文本
+                
                 logger.info(f'[{self.session_id}] Response done')
-                asyncio.create_task(self.send_to_client({
+                self.send_to_client_threadsafe({
                     'type': 'response.audio.done',
                     'response_id': response.get('response_id', '')
-                }))
+                })
                 
                 # 如果有完整的转录文本，也发送
                 if 'output' in response:
@@ -172,17 +190,19 @@ class RealtimeCallback(OmniRealtimeCallback):
                             content = output_item.get('content', [])
                             for item in content:
                                 if item.get('type') == 'text':
-                                    asyncio.create_task(self.send_to_client({
+                                    full_text = item.get('text', '')
+                                    # print(f'[{self.session_id}] 📝 AI完整回复: {full_text}')  # 已经在上面输出了
+                                    self.send_to_client_threadsafe({
                                         'type': 'conversation.item.created',
                                         'item': {
                                             'id': output_item.get('id', ''),
                                             'role': 'assistant',
                                             'content': [{
                                                 'type': 'text',
-                                                'transcript': item.get('text', '')
+                                                'transcript': full_text
                                             }]
                                         }
-                                    }))
+                                    })
             
         except Exception as e:
             logger.error(f'[{self.session_id}] Error in on_event: {e}', exc_info=True)
@@ -194,6 +214,13 @@ class RealtimeCallback(OmniRealtimeCallback):
                 await self.websocket.send(json.dumps(message))
         except Exception as e:
             logger.error(f'[{self.session_id}] Error sending to client: {e}')
+    
+    def send_to_client_threadsafe(self, message: dict):
+        """线程安全地发送消息给前端客户端"""
+        asyncio.run_coroutine_threadsafe(
+            self.send_to_client(message),
+            self.loop
+        )
 
 
 class SessionManager:
@@ -212,8 +239,11 @@ class SessionManager:
     ) -> OmniRealtimeConversation:
         """创建新会话"""
         try:
+            # 获取当前事件循环
+            loop = asyncio.get_event_loop()
+            
             # 创建回调
-            callback = RealtimeCallback(websocket, session_id)
+            callback = RealtimeCallback(websocket, session_id, loop)
             self.callbacks[session_id] = callback
             
             # 创建会话
@@ -273,7 +303,7 @@ class SessionManager:
 session_manager = SessionManager()
 
 
-async def handle_client(websocket: WebSocketServerProtocol, path: str):
+async def handle_client(websocket: WebSocketServerProtocol):
     """处理客户端连接"""
     session_id = f"session_{id(websocket)}"
     conversation = None
@@ -309,6 +339,14 @@ async def handle_client(websocket: WebSocketServerProtocol, path: str):
                         # DashScope期望直接的base64字符串，不需要data URI前缀
                         if ',' in audio_b64:
                             audio_b64 = audio_b64.split(',', 1)[1]
+                        
+                        # 每50个包打印一次日志
+                        if not hasattr(conversation, 'audio_count'):
+                            conversation.audio_count = 0
+                        conversation.audio_count += 1
+                        if conversation.audio_count == 1 or conversation.audio_count % 50 == 0:
+                            logger.info(f'[{session_id}] ✅ 已接收 {conversation.audio_count} 个音频包，最新大小: {len(audio_b64)} bytes')
+                        
                         conversation.append_audio(audio_b64)
                     else:
                         await websocket.send(json.dumps({
@@ -379,7 +417,7 @@ async def main():
         handle_client,
         SERVER_HOST,
         SERVER_PORT,
-        subprotocols=['realtime'],
+        # subprotocols=['realtime'],  # 移除子协议要求，避免前端连接失败
         ping_interval=30,
         ping_timeout=10
     ):

@@ -58,14 +58,30 @@ class WebRTCService {
   /**
    * 开始录音并实时发送音频数据
    */
-  startRecording(onAudioData) {
+  async startRecording(onAudioData) {
+    console.log('🎤 startRecording 被调用');
+    
     if (this.isRecording) {
-      console.warn('已在录音中');
+      console.warn('⚠️ 已在录音中');
       return;
     }
 
+    // 恢复AudioContext（重要！浏览器需要用户交互）
+    if (this.audioContext.state === 'suspended') {
+      console.log('🎤 AudioContext 处于暂停状态，正在恢复...');
+      try {
+        await this.audioContext.resume();
+        console.log('✅ AudioContext 已恢复，状态:', this.audioContext.state);
+      } catch (error) {
+        console.error('🔴 恢复 AudioContext 失败:', error);
+        return;
+      }
+    }
+
+    console.log('🎤 设置回调函数');
     this.onAudioDataCallback = onAudioData;
     this.isRecording = true;
+    console.log('🎤 isRecording 设置为 true');
 
     // 使用AudioWorklet或ScriptProcessorNode获取PCM数据
     this.startPCMRecording();
@@ -79,14 +95,27 @@ class WebRTCService {
    */
   startPCMRecording() {
     try {
+      console.log('🎤 startPCMRecording 被调用');
+      console.log('🎤 audioContext 状态:', this.audioContext?.state);
+      console.log('🎤 mediaStream 存在:', !!this.mediaStream);
+      console.log('🎤 mediaStream tracks:', this.mediaStream?.getTracks().length);
+      
       const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+      console.log('🎤 音频源创建成功');
       
       // 使用ScriptProcessorNode处理音频（兼容性更好）
       const bufferSize = 2048;
       const processor = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
+      console.log('🎤 ScriptProcessorNode 创建成功');
       
+      let processCount = 0;
       processor.onaudioprocess = (e) => {
         if (!this.isRecording) return;
+        
+        processCount++;
+        if (processCount === 1 || processCount % 50 === 0) {
+          console.log(`🎤 onaudioprocess 被调用 ${processCount} 次`);
+        }
         
         const inputData = e.inputBuffer.getChannelData(0);
         
@@ -107,20 +136,27 @@ class WebRTCService {
             format: 'pcm16',
             sampleRate: this.audioContext.sampleRate
           });
+        } else {
+          if (processCount === 1) {
+            console.warn('⚠️ onAudioDataCallback 未设置！');
+          }
         }
       };
       
+      console.log('🎤 连接音频节点...');
       source.connect(processor);
       processor.connect(this.audioContext.destination);
+      console.log('🎤 音频节点连接完成');
       
       // 保存引用以便后续清理
       this.audioProcessor = processor;
       this.audioSource = source;
       
-      console.log('开始PCM录音, 采样率:', this.audioContext.sampleRate);
+      console.log('✅ PCM录音启动成功, 采样率:', this.audioContext.sampleRate);
       
     } catch (error) {
-      console.error('启动PCM录音失败:', error);
+      console.error('🔴 启动PCM录音失败:', error);
+      console.error('🔴 错误堆栈:', error.stack);
       this.isRecording = false;
     }
   }
