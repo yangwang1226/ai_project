@@ -9,7 +9,7 @@ from dashscope.audio.qwen_omni import *
 
 from B64PCMPlayer import B64PCMPlayer
 
-voice = 'Cherry'  # qwen3-omni-flash-realtime 支持的声音
+voice = 'Bellona'  # qwen3-omni-flash-realtime 支持的声音
 
 pya = None
 mic_stream = None
@@ -104,7 +104,7 @@ if __name__  == '__main__':
     conversation.connect()
 
     # 从文件加载提示词
-    with open('./llm/realtime/qwen/dashscope/prompts/sales_training.txt', 'r', encoding='utf-8') as f:
+    with open('./llm/realtime/qwen/dashscope/prompts/double_goods.txt', 'r', encoding='utf-8') as f:
         instructions = f.read()
     conversation.update_session(
         output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],

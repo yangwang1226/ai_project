@@ -7,7 +7,7 @@
           <div class="logo-icon">AI</div>
           <span class="logo-text">智能销售练习</span>
         </div>
-        <button class="btn btn-primary" @click="goToRegister">
+        <button class="btn btn-primary" @click="goToOnboarding">
           开始练习
         </button>
       </div>
@@ -25,18 +25,18 @@
             通过AI模拟真实客户场景，随时随地提升你的销售沟通能力
           </p>
           <div class="hero-actions fade-in">
-            <button class="btn btn-primary btn-lg" @click="goToRegister">
+            <button class="btn btn-primary btn-lg" @click="goToOnboarding">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                 <path d="M5 12h14M12 5l7 7-7 7" stroke-width="2" stroke-linecap="round"/>
               </svg>
               立即开始
             </button>
-            <button class="btn btn-secondary btn-lg">
+            <button class="btn btn-secondary btn-lg" @click="goToRegister">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
                 <circle cx="12" cy="12" r="10" stroke-width="2"/>
                 <polygon points="10 8 16 12 10 16" fill="currentColor"/>
               </svg>
-              观看演示
+              快速注册
             </button>
           </div>
         </div>
@@ -196,6 +196,10 @@ const stopAutoSlide = () => {
   if (slideTimer) {
     clearInterval(slideTimer)
   }
+}
+
+const goToOnboarding = () => {
+  router.push('/welcome')
 }
 
 const goToRegister = () => {

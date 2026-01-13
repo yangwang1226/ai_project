@@ -29,7 +29,8 @@ INPUT_AUDIO_FORMAT = AudioFormat.PCM_24000HZ_MONO_16BIT  # 前端使用24kHz
 OUTPUT_AUDIO_FORMAT = AudioFormat.PCM_24000HZ_MONO_16BIT
 
 # 默认提示词文件路径
-DEFAULT_PROMPT_FILE = './llm/realtime/qwen/dashscope/prompts/sales_training.txt'
+# DEFAULT_PROMPT_FILE = './llm/realtime/qwen/dashscope/prompts/sales_training.txt'
+DEFAULT_PROMPT_FILE = './llm/realtime/qwen/dashscope/prompts/double_goods.txt'
 
 
 def init_dashscope_api_key():
